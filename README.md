@@ -1,15 +1,16 @@
 # AI DnD Realms 🎲
 
-A single-file, browser-based text adventure / RPG powered by the **Google Gemini 1.5 Flash** API.
+A single-file, browser-based text adventure / RPG powered by the **Google Gemini Flash** API
+(auto-detects a current Flash model for your key — Gemini 1.5 was retired by Google in 2025).
 Pick a realm (Fantasy, Sci-Fi, Horror, Noir, Post-Apocalyptic, or write your own), talk to NPCs
 who remember everything you say, and fight in a fast hybrid combat system.
 
-▶️ **Play it live:** https://YOUR-USERNAME.github.io/ai-dnd-realms/
+▶️ **Play it live:** https://sumankayal247.github.io/ai-dnd-realms/
 
 ## How to play
 1. Open the live link (or `index.html` locally in Chrome).
 2. Click **⚙️ Settings** and paste your own **Gemini API key**
-   (free tier = 1,500 requests/day — get one at https://aistudio.google.com/apikey).
+   (free tier available — get one at https://aistudio.google.com/apikey).
 3. Click **⚔️ New Adventure** and play. Your key is stored only in *your* browser.
 
 ## Design highlights
