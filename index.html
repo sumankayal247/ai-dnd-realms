@@ -162,6 +162,17 @@
   .field input[type=text],.field input[type=password]{width:100%;background:#0e0f17;border:1px solid var(--line);
     color:var(--ink);border-radius:8px;padding:10px 12px;font-family:monospace;letter-spacing:1px}
   select.sel{background:#0e0f17;border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:8px 10px;font-family:inherit}
+  .mrow{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:#0e0f17;border:1px solid var(--line);
+    color:var(--ink);border-radius:8px;padding:9px 11px;margin:5px 0;cursor:pointer;transition:.15s}
+  .mrow:hover{border-color:var(--accent)}
+  .mrow.sel{border-color:var(--accent);background:#15171f;box-shadow:inset 0 0 0 1px var(--accent)}
+  .mrow .dot{width:10px;height:10px;border-radius:50%;flex:0 0 auto;background:var(--muted)}
+  .mrow .dot.up{background:var(--good);box-shadow:0 0 7px var(--good)}
+  .mrow .dot.down{background:var(--bad)}
+  .mrow .mmain{flex:1;min-width:0}
+  .mrow .mname{font-weight:600;font-size:.92rem}
+  .mrow .mmeta{color:var(--muted);font-size:.76rem}
+  .mrow .mcount{font-size:.74rem;color:var(--muted);text-align:right;white-space:nowrap}
   .toggle{display:flex;justify-content:space-between;align-items:center}
   .switch{position:relative;width:46px;height:26px}
   .switch input{display:none}
@@ -282,9 +293,10 @@ window.REALM_IMG={
 <section id="scr-game" class="screen">
   <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:10px">
     <button class="back" onclick="quitToMenu()" style="margin:0">‹ Save & quit</button>
-    <div class="row">
+    <div class="row" style="align-items:center">
       <span class="pill" id="locPill">—</span>
-      <span class="pill" id="reqPill">0 / 1500</span>
+      <span class="pill" id="reqPill" title="Requests used today on the current model">0 / 250</span>
+      <button class="btn small" onclick="openSettings()" title="Settings (model, key, options)">⚙</button>
     </div>
   </div>
   <div class="gamewrap">
@@ -335,9 +347,10 @@ window.REALM_IMG={
     </div>
 
     <div class="field">
-      <label>AI model</label>
-      <div class="desc">Getting “high demand” errors? Pick a <b>lighter</b> model — they’re far more available and allow more requests per day. Daily numbers are approximate free-tier limits (<a href="https://ai.google.dev/gemini-api/docs/rate-limits" target="_blank" rel="noopener" style="color:var(--accent)">official limits</a>).</div>
-      <select class="sel" id="set-model" style="width:100%"></select>
+      <div class="toggle"><label>AI model</label>
+        <button class="btn small" onclick="refreshAvailability()">↻ Check availability</button></div>
+      <div class="desc">Getting “high demand” errors? Pick a <b>lighter</b> model — they’re far more available and allow more requests per day. <span style="color:var(--good)">●</span> = your key can use it, <span style="color:var(--bad)">●</span> = unavailable. Daily numbers are approximate free-tier limits (<a href="https://ai.google.dev/gemini-api/docs/rate-limits" target="_blank" rel="noopener" style="color:var(--accent)">official limits</a>) and reset each day.</div>
+      <div id="modelList"></div>
       <div class="keystate" id="modelHint"></div>
     </div>
 
@@ -428,30 +441,40 @@ function openSettings(){
   $('#set-reduced').checked=settings.reduced;
   $('#apiKey').value = getApiKey();
   refreshKeyState();
-  populateModelSelect();
+  renderModelList();
+  // auto-check availability once per visit if we have a key and haven't yet this session
+  if(getApiKey() && availModels===null) refreshAvailability();
   go('settings');
 }
-function populateModelSelect(){
-  const sel=$('#set-model'); if(!sel) return;
+function dotClass(id){
+  if(availModels===null) return '';          // unknown (not checked yet)
+  return availModels.has(id) ? 'up' : 'down'; // green / red
+}
+function renderModelList(){
+  const box=$('#modelList'); if(!box) return;
   const cur=getModel();
-  sel.innerHTML='';
-  let found=false;
-  MODEL_OPTIONS.forEach(o=>{
-    const opt=document.createElement('option');
-    opt.value=o.id; opt.textContent=`${o.tier} — ${o.id}  ·  ${o.rpd}`;
-    if(o.id===cur){ opt.selected=true; found=true; }
-    sel.appendChild(opt);
+  box.innerHTML='';
+  const ids=MODEL_OPTIONS.map(o=>o.id);
+  const list=MODEL_OPTIONS.slice();
+  if(!ids.includes(cur)) list.push({id:cur,tier:'Auto-detected',rpd:'~'+modelLimit(cur)+' req/day'});
+  list.forEach(o=>{
+    const used=reqUsed(o.id), lim=modelLimit(o.id);
+    const row=el('button','mrow'+(o.id===cur?' sel':''));
+    row.innerHTML=`<span class="dot ${dotClass(o.id)}"></span>
+      <span class="mmain"><span class="mname">${esc(o.id)}</span><br><span class="mmeta">${esc(o.tier)} · ${esc(o.rpd)}</span></span>
+      <span class="mcount">${used}/${lim}<br>today</span>`;
+    row.onclick=()=>{ setModel(o.id); renderModelList(); updateModelHint(); updateReqPill(); flash('Model set to '+o.id); };
+    box.appendChild(row);
   });
-  if(!found){ // an auto-detected model not in the list — show it too
-    const opt=document.createElement('option');
-    opt.value=cur; opt.textContent=`Auto-detected — ${cur}`; opt.selected=true;
-    sel.appendChild(opt);
-  }
   updateModelHint();
 }
 function updateModelHint(){
   const h=$('#modelHint'); if(!h) return;
-  h.className='keystate'; h.textContent='Active model: '+getModel()+'. Lighter models = fewer “high demand” errors.';
+  const m=getModel();
+  let avail = availModels===null ? '' :
+    (availModels.has(m) ? ' — ✓ available to your key' : ' — ✗ not available; pick a green one');
+  h.className='keystate'+(availModels && !availModels.has(m)?' warn':'');
+  h.textContent='Active model: '+m+avail+'.';
 }
 function wireSettings(){
   $('#set-typewriter').onchange=e=>save('typewriter',e.target.checked);
@@ -461,7 +484,6 @@ function wireSettings(){
   $('#set-combatmath').onchange=e=>save('combatmath',e.target.checked);
   $('#set-sound').onchange=e=>save('sound',e.target.checked);
   $('#set-reduced').onchange=e=>{save('reduced',e.target.checked);applySettings();};
-  $('#set-model').onchange=e=>{ setModel(e.target.value); updateModelHint(); flash('Model set to '+e.target.value); };
   function save(k,v){settings[k]=v;LS.setItem('aidnd_settings',JSON.stringify(settings));}
 }
 
@@ -506,31 +528,41 @@ async function testKey(){
     // tests the model chosen in the dropdown; rawGemini self-heals only if it's missing
     await rawGemini('Reply with the single word: ok', {maxTokens:5, system:'You are a connectivity test.'});
     s.className='keystate ok'; s.textContent='✓ Key works! Using model: '+getModel();
-    populateModelSelect();   // sync the dropdown if a self-heal changed the model
+    renderModelList();   // sync the list if a self-heal changed the model
   }catch(err){
     s.className='keystate warn'; s.textContent='✗ '+(err.message||'Key failed. Check it and try again.');
   }
 }
 
 /* ====================================================================
-   DAILY REQUEST BUDGET  (1500 / day free tier)
+   DAILY REQUEST BUDGET  (per-model, free tier, resets each day)
+   We count requests locally per model. Each model has its own daily allowance,
+   so the counter and the cap both follow whichever model is selected. The date
+   is checked on every read, so it naturally rolls over to a fresh count each day.
    ==================================================================== */
-const DAILY_LIMIT=1500;
 function getReqState(){
-  let d={date:todayStr(),count:0};
-  try{ const s=JSON.parse(LS.getItem('aidnd_req')||'{}'); if(s.date===todayStr()) d=s; }catch(e){}
+  let d={date:todayStr(),counts:{}};
+  try{ const s=JSON.parse(LS.getItem('aidnd_req')||'{}'); if(s.date===todayStr() && s.counts) d=s; }catch(e){}
   return d;
 }
-function reqLeft(){ const s=getReqState(); return DAILY_LIMIT - s.count; }
+function reqUsed(model){ return getReqState().counts[model||getModel()]||0; }
+function reqLeft(model){ const m=model||getModel(); return modelLimit(m)-reqUsed(m); }
 function bumpReq(){
-  const s=getReqState(); s.count++; s.date=todayStr();
+  const s=getReqState(); const m=getModel();
+  s.counts[m]=(s.counts[m]||0)+1; s.date=todayStr();
   LS.setItem('aidnd_req',JSON.stringify(s));
   updateReqPill();
 }
 function updateReqPill(){
-  const s=getReqState();
-  const p=$('#reqPill'); if(p) p.textContent=`${s.count} / ${DAILY_LIMIT}`;
-  if($('#reqcountLine')) $('#reqcountLine').textContent=`${reqLeft()} adventures-worth of magic remain today.`;
+  const m=getModel(), used=reqUsed(m), lim=modelLimit(m);
+  const p=$('#reqPill');
+  if(p){
+    p.textContent=`${used} / ${lim}`;
+    p.title=`${m}: ${used} of ~${lim} free requests used today (resets daily)`;
+    const frac=used/lim;
+    p.style.borderColor = frac>=1?'var(--bad)' : frac>=0.85?'var(--accent)' : 'var(--line)';
+  }
+  if($('#reqcountLine')) $('#reqcountLine').textContent=`${Math.max(0,reqLeft(m))} requests left today on ${m}.`;
 }
 
 /* ====================================================================
@@ -549,12 +581,13 @@ const MODEL_CANDIDATES=['gemini-2.5-flash','gemini-2.0-flash','gemini-flash-late
 // approximate FREE-tier requests/day (Google changes these — see their rate-limits page).
 // Higher-availability (lite) models are far less likely to hit the "high demand" 503.
 const MODEL_OPTIONS=[
-  {id:'gemini-2.5-pro',        tier:'Best (slow, often busy)', rpd:'~100 req/day'},
-  {id:'gemini-2.5-flash',      tier:'Good (default, can be busy)', rpd:'~250 req/day'},
-  {id:'gemini-2.0-flash',      tier:'Medium (usually available)', rpd:'~200 req/day'},
-  {id:'gemini-2.5-flash-lite', tier:'Light (fast, most available)', rpd:'~1000 req/day'},
-  {id:'gemini-2.0-flash-lite', tier:'Basic (lightweight)', rpd:'~200 req/day'},
+  {id:'gemini-2.5-pro',        tier:'Best (slow, often busy)',       rpd:'~100 req/day',  rpdNum:100},
+  {id:'gemini-2.5-flash',      tier:'Good (default, can be busy)',   rpd:'~250 req/day',  rpdNum:250},
+  {id:'gemini-2.0-flash',      tier:'Medium (usually available)',    rpd:'~200 req/day',  rpdNum:200},
+  {id:'gemini-2.5-flash-lite', tier:'Light (fast, most available)',  rpd:'~1000 req/day', rpdNum:1000},
+  {id:'gemini-2.0-flash-lite', tier:'Basic (lightweight)',           rpd:'~200 req/day',  rpdNum:200},
 ];
+function modelLimit(id){ const o=MODEL_OPTIONS.find(m=>m.id===(id||getModel())); return o? o.rpdNum : 200; }
 function getModel(){ return LS.getItem('aidnd_model') || MODEL_CANDIDATES[0]; }
 function setModel(m){ if(m) LS.setItem('aidnd_model', m); }
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
@@ -565,18 +598,24 @@ function geminiUrl(model,key){
   return u;
 }
 
-// Ask the API which models this key can actually use, and pick a good Flash one.
-async function discoverModel(){
+// Ask the API which models this key can use (ListModels is a separate endpoint and
+// does NOT count against the per-model generateContent quota, so no bumpReq here).
+async function fetchSupportedModels(){
   const key=getApiKey(); if(!key) throw new Error('No API key set.');
   const url=`${GEMINI_HOST}/${API_VER}/models?pageSize=200&key=${encodeURIComponent(key)}`;
   if(!url.startsWith(GEMINI_HOST+'/')) throw new Error('Refusing to contact a non-Gemini host.');
-  const res=await fetch(url); bumpReq();
+  const res=await fetch(url);
   if(!res.ok) throw new Error('Could not list models ('+res.status+').');
   const j=await res.json();
-  const usable=(j.models||[])
+  return (j.models||[])
     .filter(m=>(m.supportedGenerationMethods||[]).includes('generateContent'))
     .map(m=>String(m.name||'').replace(/^models\//,''))
     .filter(n=>/^[a-zA-Z0-9.\-]+$/.test(n));
+}
+// Pick a good Flash model from the supported list and remember it.
+async function discoverModel(){
+  const usable=await fetchSupportedModels();
+  availModels=new Set(usable);   // cache for the green/red dots
   const bad=/embedding|aqa|vision|tts|image|audio|live|gemma/i;
   const flash=usable.filter(n=>/flash/i.test(n) && !bad.test(n));
   const rank=n=>(/(preview|exp)/i.test(n)?2:0)+(/lite/i.test(n)?1:0); // prefer stable, non-lite
@@ -584,6 +623,17 @@ async function discoverModel(){
   const chosen=flash[0] || usable.find(n=>!bad.test(n)) || usable[0];
   if(!chosen) throw new Error('No usable Gemini model found for this key.');
   setModel(chosen); return chosen;
+}
+// Session cache of which models the key supports (for the green/red dots).
+let availModels=null;
+async function refreshAvailability(){
+  const hint=$('#modelHint');
+  if(!getApiKey()){ availModels=null; renderModelList(); if(hint){hint.className='keystate warn';hint.textContent='Paste an API key to check availability.';} return; }
+  if(hint){ hint.className='keystate'; hint.innerHTML='<span class="spinner"></span> Checking which models your key can use…'; }
+  try{
+    availModels=new Set(await fetchSupportedModels());
+  }catch(e){ availModels=null; if(hint){hint.className='keystate warn';hint.textContent='Could not check availability: '+e.message;} renderModelList(); return; }
+  renderModelList(); updateModelHint();
 }
 
 // low-level call (no game-history, used for tests & one-shots)
@@ -650,7 +700,7 @@ async function rawGemini(prompt,{system='',maxTokens=400,temperature=0.9,history
 /* In-game narrator call. Enforces daily limit → lock screen.
    useHistory: include & extend the running conversation (for NPC memory). */
 async function narrate(prompt,{useHistory=false,maxTokens=420,temperature=0.95,record=true,context=''}={}){
-  if(reqLeft()<=0){ showLockScreen(); throw new Error('daily-limit'); }
+  if(reqLeft()<=0){ showQuotaReached(); throw new Error('daily-limit'); }
   const full = (context?context+'\n\n':'') + prompt;
   let history=null;
   if(useHistory) history=state.history;
@@ -1905,16 +1955,21 @@ function confirmModal(title,body,buttons){
   const wrap=$('#modalBody').querySelector('.row');
   buttons.forEach(b=>{ const x=el('button','btn small '+(b.cls||''),esc(b.t)); x.onclick=b.fn; wrap.appendChild(x); });
 }
-function showLockScreen(){
+function showQuotaReached(){
+  const m=getModel();
   $('#modalBody').className='modal lock';
   $('#modalBody').innerHTML=`
     <div class="moon">🌙</div>
-    <h2>The realm grows quiet…</h2>
-    <p>You have spent all of today's magic — the mists close in and the world drifts to sleep.</p>
-    <p style="color:var(--muted)"><i>Today's adventure ends here. Return tomorrow, traveler — your story will be waiting.</i></p>
+    <h2>This model is spent for today</h2>
+    <p>You've used today's free requests for <b>${esc(m)}</b> (${reqUsed(m)}/${modelLimit(m)}).</p>
+    <p style="color:var(--muted)"><i>Switch to another model to keep adventuring, or rest until tomorrow — your story is saved and the count resets each day.</i></p>
     <p id="reqcountLine" class="reqcount"></p>
-    <button class="btn primary" onclick="hideOverlay();quitToMenu()">Rest until tomorrow</button>`;
+    <div class="row center" style="margin-top:14px">
+      <button class="btn small primary" id="qSwitch">⚙ Switch model</button>
+      <button class="btn small" onclick="hideOverlay();quitToMenu()">Rest until tomorrow</button>
+    </div>`;
   $('#overlay').classList.add('show');
+  $('#qSwitch').onclick=()=>{ hideOverlay(); openSettings(); };
   updateReqPill();
 }
 let flashT;
