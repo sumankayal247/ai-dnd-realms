@@ -27,4 +27,4 @@ who remember everything you say, and fight in a fast hybrid combat system.
 - Because this is a static site, the source is public — that's fine, there are no secrets in it.
 - For heavier use, restrict your key in Google AI Studio / Cloud Console to your Pages URL.
 
-Built with the help of Claude Code.
+
