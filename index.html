@@ -334,6 +334,13 @@ window.REALM_IMG={
       </div>
     </div>
 
+    <div class="field">
+      <label>AI model</label>
+      <div class="desc">Getting “high demand” errors? Pick a <b>lighter</b> model — they’re far more available and allow more requests per day. Daily numbers are approximate free-tier limits (<a href="https://ai.google.dev/gemini-api/docs/rate-limits" target="_blank" rel="noopener" style="color:var(--accent)">official limits</a>).</div>
+      <select class="sel" id="set-model" style="width:100%"></select>
+      <div class="keystate" id="modelHint"></div>
+    </div>
+
     <div class="field toggle"><div><label>Typewriter text</label><div class="desc">Reveal narration letter-by-letter.</div></div>
       <label class="switch"><input type="checkbox" id="set-typewriter"><span class="slider"></span></label></div>
 
@@ -421,7 +428,30 @@ function openSettings(){
   $('#set-reduced').checked=settings.reduced;
   $('#apiKey').value = getApiKey();
   refreshKeyState();
+  populateModelSelect();
   go('settings');
+}
+function populateModelSelect(){
+  const sel=$('#set-model'); if(!sel) return;
+  const cur=getModel();
+  sel.innerHTML='';
+  let found=false;
+  MODEL_OPTIONS.forEach(o=>{
+    const opt=document.createElement('option');
+    opt.value=o.id; opt.textContent=`${o.tier} — ${o.id}  ·  ${o.rpd}`;
+    if(o.id===cur){ opt.selected=true; found=true; }
+    sel.appendChild(opt);
+  });
+  if(!found){ // an auto-detected model not in the list — show it too
+    const opt=document.createElement('option');
+    opt.value=cur; opt.textContent=`Auto-detected — ${cur}`; opt.selected=true;
+    sel.appendChild(opt);
+  }
+  updateModelHint();
+}
+function updateModelHint(){
+  const h=$('#modelHint'); if(!h) return;
+  h.className='keystate'; h.textContent='Active model: '+getModel()+'. Lighter models = fewer “high demand” errors.';
 }
 function wireSettings(){
   $('#set-typewriter').onchange=e=>save('typewriter',e.target.checked);
@@ -431,6 +461,7 @@ function wireSettings(){
   $('#set-combatmath').onchange=e=>save('combatmath',e.target.checked);
   $('#set-sound').onchange=e=>save('sound',e.target.checked);
   $('#set-reduced').onchange=e=>{save('reduced',e.target.checked);applySettings();};
+  $('#set-model').onchange=e=>{ setModel(e.target.value); updateModelHint(); flash('Model set to '+e.target.value); };
   function save(k,v){settings[k]=v;LS.setItem('aidnd_settings',JSON.stringify(settings));}
 }
 
@@ -470,11 +501,12 @@ function clearKey(){ LS.removeItem('aidnd_apikey'); $('#apiKey').value=''; refre
 async function testKey(){
   const k=getApiKey();
   if(!k){ refreshKeyState(); return; }
-  const s=$('#keyState'); s.className='keystate'; s.innerHTML='<span class="spinner"></span> Testing & detecting a model…';
+  const s=$('#keyState'); s.className='keystate'; s.innerHTML='<span class="spinner"></span> Testing your selected model…';
   try{
-    const model=await discoverModel();   // find & remember a model this key supports
+    // tests the model chosen in the dropdown; rawGemini self-heals only if it's missing
     await rawGemini('Reply with the single word: ok', {maxTokens:5, system:'You are a connectivity test.'});
-    s.className='keystate ok'; s.textContent='✓ Key works! Using model: '+model;
+    s.className='keystate ok'; s.textContent='✓ Key works! Using model: '+getModel();
+    populateModelSelect();   // sync the dropdown if a self-heal changed the model
   }catch(err){
     s.className='keystate warn'; s.textContent='✗ '+(err.message||'Key failed. Check it and try again.');
   }
@@ -513,8 +545,19 @@ const API_VER='v1beta';
 // in order; whichever works is remembered. If none match, the app asks the API which
 // models the key supports (discoverModel) and self-heals — so it survives future renames.
 const MODEL_CANDIDATES=['gemini-2.5-flash','gemini-2.0-flash','gemini-flash-latest','gemini-2.5-flash-lite','gemini-2.0-flash-lite'];
+// User-selectable models for the Settings dropdown. Quality is the tier; rpd is the
+// approximate FREE-tier requests/day (Google changes these — see their rate-limits page).
+// Higher-availability (lite) models are far less likely to hit the "high demand" 503.
+const MODEL_OPTIONS=[
+  {id:'gemini-2.5-pro',        tier:'Best (slow, often busy)', rpd:'~100 req/day'},
+  {id:'gemini-2.5-flash',      tier:'Good (default, can be busy)', rpd:'~250 req/day'},
+  {id:'gemini-2.0-flash',      tier:'Medium (usually available)', rpd:'~200 req/day'},
+  {id:'gemini-2.5-flash-lite', tier:'Light (fast, most available)', rpd:'~1000 req/day'},
+  {id:'gemini-2.0-flash-lite', tier:'Basic (lightweight)', rpd:'~200 req/day'},
+];
 function getModel(){ return LS.getItem('aidnd_model') || MODEL_CANDIDATES[0]; }
 function setModel(m){ if(m) LS.setItem('aidnd_model', m); }
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 function safeModel(m){ if(!/^[a-zA-Z0-9.\-]+$/.test(String(m))) throw new Error('Invalid model name.'); return m; }
 function geminiUrl(model,key){
   const u=`${GEMINI_HOST}/${API_VER}/models/${safeModel(model)}:generateContent?key=${encodeURIComponent(key)}`;
@@ -552,16 +595,25 @@ async function rawGemini(prompt,{system='',maxTokens=400,temperature=0.9,history
     generationConfig:{temperature,maxOutputTokens:maxTokens,topP:0.95}
   };
   if(system) body.system_instruction={parts:[{text:String(system).slice(0,12000)}]};
-  async function call(model){
-    // Gemini 2.5 models "think" by default and spend the output-token budget on hidden
-    // reasoning, which truncates narration mid-sentence. We don't need reasoning for prose,
-    // so disable thinking on 2.5 (also faster/cheaper). 2.0 doesn't support thinkingConfig.
+  async function callOnce(model){
+    // 2.5 FLASH models "think" by default and spend the output-token budget on hidden
+    // reasoning, truncating narration mid-sentence — disable it (faster/cheaper too).
+    // NOTE: only flash variants; 2.5 Pro requires a thinking budget, and 2.0 has none.
     const b={...body, generationConfig:{...body.generationConfig}};
-    if(/2\.5|thinking/i.test(model)) b.generationConfig.thinkingConfig={thinkingBudget:0};
+    if(/2\.5/.test(model) && /flash/i.test(model)) b.generationConfig.thinkingConfig={thinkingBudget:0};
     let res;
     try{ res=await fetch(geminiUrl(model,key),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); }
     catch(e){ throw new Error('Network error reaching Gemini.'); }
     bumpReq(); return res;
+  }
+  // Retry transient overloads (503 "high demand") and brief 429 spikes with backoff.
+  async function call(model){
+    let res=await callOnce(model);
+    for(let attempt=0; !res.ok && (res.status===503 || res.status===429) && attempt<2; attempt++){
+      await sleep(1000*(attempt+1)+600);   // 1.6s, then 2.6s
+      res=await callOnce(model);
+    }
+    return res;
   }
   let model=getModel();
   let res=await call(model);
@@ -575,9 +627,11 @@ async function rawGemini(prompt,{system='',maxTokens=400,temperature=0.9,history
   if(!res.ok){
     let msg='Gemini error '+res.status;
     try{const j=await res.json(); if(j.error?.message) msg=j.error.message;}catch(e){}
-    if(res.status===429) msg='Rate limit / quota reached.';
-    if(res.status===400 && /API key/i.test(msg)) msg='Invalid API key.';
-    if(res.status===404) msg='No supported Gemini model found for this key. Try "Test key" in Settings.';
+    if(res.status===503 || /overloaded|high demand|unavailable/i.test(msg))
+      msg='This model is busy right now. Try again, or pick a lighter model in ⚙ Settings (e.g. Flash-Lite — far more available).';
+    else if(res.status===429) msg='Rate/quota limit hit. Switch to a higher-limit model in ⚙ Settings (Flash-Lite ~1000/day), or wait a bit.';
+    else if(res.status===400 && /API key/i.test(msg)) msg='Invalid API key.';
+    else if(res.status===404) msg='No supported Gemini model found for this key. Try "Test key" in Settings.';
     throw new Error(msg);
   }
   const j=await res.json();
