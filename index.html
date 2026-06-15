@@ -404,7 +404,13 @@ const rint=(a,b)=>Math.floor(Math.random()*(b-a+1))+a;
 const pick=a=>a[Math.floor(Math.random()*a.length)];
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 const cap=s=>s.charAt(0).toUpperCase()+s.slice(1);
-const todayStr=()=>new Date().toISOString().slice(0,10);
+// Google resets free-tier quotas at midnight US-Pacific, NOT your local midnight.
+// Track our daily count on the same clock so it doesn't reset early (e.g. in IST)
+// and mislead you into thinking the quota is fresh when Google still counts yesterday.
+const todayStr=()=>{
+  try{ return new Date().toLocaleDateString('en-CA',{timeZone:'America/Los_Angeles'}); }
+  catch(e){ return new Date().toISOString().slice(0,10); }
+};
 const LS = window.localStorage;
 
 /* ---------- screen router ---------- */
@@ -591,6 +597,19 @@ function modelLimit(id){ const o=MODEL_OPTIONS.find(m=>m.id===(id||getModel()));
 function getModel(){ return LS.getItem('aidnd_model') || MODEL_CANDIDATES[0]; }
 function setModel(m){ if(m) LS.setItem('aidnd_model', m); }
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+// Serialize outgoing requests with a minimum gap so accidental bursts (e.g. a finishing
+// blow immediately followed by a boss-aftermath call) don't trip the low per-minute
+// free-tier limit. Imperceptible since calls already take 1-3s.
+let _lastReqAt=0, _reqGate=Promise.resolve();
+const MIN_REQ_GAP=1200;
+function reqSlot(){
+  _reqGate=_reqGate.then(async()=>{
+    const wait=MIN_REQ_GAP-(Date.now()-_lastReqAt);
+    if(wait>0) await sleep(wait);
+    _lastReqAt=Date.now();
+  });
+  return _reqGate;
+}
 function safeModel(m){ if(!/^[a-zA-Z0-9.\-]+$/.test(String(m))) throw new Error('Invalid model name.'); return m; }
 function geminiUrl(model,key){
   const u=`${GEMINI_HOST}/${API_VER}/models/${safeModel(model)}:generateContent?key=${encodeURIComponent(key)}`;
@@ -656,15 +675,18 @@ async function rawGemini(prompt,{system='',maxTokens=400,temperature=0.9,history
     catch(e){ throw new Error('Network error reaching Gemini.'); }
     bumpReq(); return res;
   }
-  // Retry transient overloads (503 "high demand") and brief 429 spikes with backoff.
+  // Retry ONLY transient overloads (503 "high demand"). Do NOT retry 429 — that's a
+  // rate/quota limit, and each retry burns another request from the (low) per-minute
+  // free-tier bucket, which only makes it worse.
   async function call(model){
     let res=await callOnce(model);
-    for(let attempt=0; !res.ok && (res.status===503 || res.status===429) && attempt<2; attempt++){
+    for(let attempt=0; !res.ok && res.status===503 && attempt<2; attempt++){
       await sleep(1000*(attempt+1)+600);   // 1.6s, then 2.6s
       res=await callOnce(model);
     }
     return res;
   }
+  await reqSlot();   // space requests out to respect the per-minute free-tier limit
   let model=getModel();
   let res=await call(model);
   // self-heal: if the chosen model is gone/unsupported, discover a working one & retry once
@@ -675,12 +697,17 @@ async function rawGemini(prompt,{system='',maxTokens=400,temperature=0.9,history
     }
   }
   if(!res.ok){
-    let msg='Gemini error '+res.status;
-    try{const j=await res.json(); if(j.error?.message) msg=j.error.message;}catch(e){}
-    if(res.status===503 || /overloaded|high demand|unavailable/i.test(msg))
-      msg='This model is busy right now. Try again, or pick a lighter model in ⚙ Settings (e.g. Flash-Lite — far more available).';
-    else if(res.status===429) msg='Rate/quota limit hit. Switch to a higher-limit model in ⚙ Settings (Flash-Lite ~1000/day), or wait a bit.';
-    else if(res.status===400 && /API key/i.test(msg)) msg='Invalid API key.';
+    let g=''; try{ g=(await res.json()).error?.message||''; }catch(e){}
+    let msg=g||('Gemini error '+res.status);
+    if(res.status===503 || /overloaded|high demand|unavailable/i.test(g)){
+      msg='This model is busy (high demand) — it retried and still failed. Pick a lighter model in ⚙ Settings (Flash-Lite is far more available).';
+    } else if(res.status===429){
+      const perMin=/per minute|perminute|per-minute|requests per min/i.test(g);
+      msg = perMin
+        ? '⏳ Too many requests in a short burst (free-tier PER-MINUTE limit). Wait ~30–60 seconds, then continue — or switch model in ⚙ Settings (each model has its own bucket).'
+        : 'Daily free quota for this model is used up on Google\'s side. Switch model in ⚙ Settings (each has a separate daily allowance), or come back after midnight US-Pacific. ['+g.slice(0,90)+']';
+    }
+    else if(res.status===400 && /API key/i.test(g)) msg='Invalid API key.';
     else if(res.status===404) msg='No supported Gemini model found for this key. Try "Test key" in Settings.';
     throw new Error(msg);
   }
