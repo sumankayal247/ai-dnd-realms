@@ -1,0 +1,10 @@
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*~
+.vscode/
+.idea/
+
+# Never commit a real API key file if you add one later
+*.key
+secrets.*
