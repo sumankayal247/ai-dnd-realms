@@ -8,3 +8,5 @@ Thumbs.db
 # Never commit a real API key file if you add one later
 *.key
 secrets.*
+venv/
+__pycache__/

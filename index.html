@@ -8,7 +8,7 @@
      are required for a single-file app; the critical control here is connect-src,
      which means even a successful injection cannot exfiltrate your key or saves
      to any other host. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src https://generativelanguage.googleapis.com; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
 <meta name="referrer" content="no-referrer">
 <title>AI DnD Realms</title>
 <!-- Inline d20 favicon (data URI) — no external request, complies with CSP img-src data: -->
@@ -30,7 +30,7 @@
 -->
 <script>
   /* ====== API KEY PLACEHOLDER — REPLACE THIS, or set it in Settings ====== */
-  const GEMINI_API_KEY_PLACEHOLDER = "PASTE-YOUR-GEMINI-API-KEY-HERE";
+
   /* ======================================================================
      SECURITY NOTE (OWASP A02 — Cryptographic Failures):
      A browser-only app CANNOT truly hide an API key — whoever can open this
@@ -335,14 +335,11 @@ window.REALM_IMG={
   <p class="lead">Your API key and quality-of-life options. Everything is saved in this browser only.</p>
   <div class="form">
     <div class="field">
-      <label>Google Gemini API key</label>
-      <div class="desc">Masked for privacy. You may <b>paste</b> a key here — copying out is disabled. The last key is remembered.</div>
-      <input type="password" id="apiKey" maxlength="200" placeholder="Paste your Gemini API key…" spellcheck="false" autocomplete="off">
+      <label>Server Connection</label>
+      <div class="desc">AI is powered securely via the backend.</div>
       <div class="keystate" id="keyState"></div>
       <div class="row" style="margin-top:8px">
-        <button class="btn small" onclick="toggleKeyView()" id="revealBtn">👁 Reveal</button>
-        <button class="btn small" onclick="testKey()">🔌 Test key</button>
-        <button class="btn small" onclick="clearKey()">🗑 Forget key</button>
+        <button class="btn small" onclick="testConnection()">🔌 Test connection</button>
       </div>
     </div>
 
@@ -445,11 +442,8 @@ function openSettings(){
   $('#set-combatmath').checked=settings.combatmath;
   $('#set-sound').checked=settings.sound;
   $('#set-reduced').checked=settings.reduced;
-  $('#apiKey').value = getApiKey();
-  refreshKeyState();
+  checkServerStatus();
   renderModelList();
-  // auto-check availability once per visit if we have a key and haven't yet this session
-  if(getApiKey() && availModels===null) refreshAvailability();
   go('settings');
 }
 function dotClass(id){
@@ -493,50 +487,37 @@ function wireSettings(){
   function save(k,v){settings[k]=v;LS.setItem('aidnd_settings',JSON.stringify(settings));}
 }
 
-/* ---------- API key (masked, paste-only, remembered) ---------- */
-function getApiKey(){
-  const stored = LS.getItem('aidnd_apikey');
-  if(stored) return stored;
-  if(GEMINI_API_KEY_PLACEHOLDER && !GEMINI_API_KEY_PLACEHOLDER.startsWith('PASTE')) return GEMINI_API_KEY_PLACEHOLDER;
-  return '';
-}
-function refreshKeyState(){
-  const k=getApiKey(); const s=$('#keyState');
+/* ---------- Server Connection Check ---------- */
+async function checkServerStatus(){
+  const s=$('#keyState');
   if(!s) return;
-  if(k){ s.className='keystate ok'; s.textContent='✓ A key is saved ('+k.length+' characters). It stays in this browser only.'; }
-  else { s.className='keystate warn'; s.textContent='⚠ No key saved yet — paste one above to play.'; }
+  try {
+    const res = await fetch('/api/health');
+    if (res.ok) {
+      const data = await res.json();
+      if (data.configured) {
+        s.className='keystate ok'; s.textContent='✓ Connected to backend (FreeLLMAPI configured).';
+      } else {
+        s.className='keystate warn'; s.textContent='⚠ Backend is reachable, but FreeLLMAPI is not configured.';
+      }
+    } else {
+      s.className='keystate warn'; s.textContent='⚠ Backend health check failed.';
+    }
+  } catch (err) {
+    s.className='keystate warn'; s.textContent='⚠ Could not reach backend.';
+  }
 }
-function wireApiKey(){
-  const inp=$('#apiKey');
-  // block copy / cut / drag-out, allow paste
-  ['copy','cut','dragstart'].forEach(ev=>inp.addEventListener(ev,e=>e.preventDefault()));
-  inp.addEventListener('contextmenu',e=>{/* allow paste via menu but block copy by clearing selection */ });
-  inp.addEventListener('input',()=>{
-    // API keys never contain whitespace — strip accidental spaces/newlines from a paste
-    const v=inp.value.replace(/\s+/g,'');
-    if(v!==inp.value) inp.value=v;
-    if(v) LS.setItem('aidnd_apikey',v); else LS.removeItem('aidnd_apikey');
-    refreshKeyState();
-  });
-  inp.addEventListener('paste',()=>setTimeout(()=>{ inp.dispatchEvent(new Event('input')); },0));
-}
-function toggleKeyView(){
-  const inp=$('#apiKey'); const b=$('#revealBtn');
-  if(inp.type==='password'){inp.type='text';b.textContent='🙈 Hide';}
-  else{inp.type='password';b.textContent='👁 Reveal';}
-}
-function clearKey(){ LS.removeItem('aidnd_apikey'); $('#apiKey').value=''; refreshKeyState(); }
-async function testKey(){
-  const k=getApiKey();
-  if(!k){ refreshKeyState(); return; }
-  const s=$('#keyState'); s.className='keystate'; s.innerHTML='<span class="spinner"></span> Testing your selected model…';
+
+async function testConnection(){
+  const s=$('#keyState');
+  if(!s) return;
+  s.className='keystate'; s.innerHTML='<span class="spinner"></span> Testing connection…';
   try{
-    // tests the model chosen in the dropdown; rawGemini self-heals only if it's missing
     await rawGemini('Reply with the single word: ok', {maxTokens:5, system:'You are a connectivity test.'});
-    s.className='keystate ok'; s.textContent='✓ Key works! Using model: '+getModel();
-    renderModelList();   // sync the list if a self-heal changed the model
+    s.className='keystate ok'; s.textContent='✓ AI is responding! Using model: '+getModel();
+    renderModelList();
   }catch(err){
-    s.className='keystate warn'; s.textContent='✗ '+(err.message||'Key failed. Check it and try again.');
+    s.className='keystate warn'; s.textContent='✗ '+(err.message||'Connection failed. Check backend configuration.');
   }
 }
 
@@ -577,11 +558,7 @@ function updateReqPill(){
 // OWASP A10 (SSRF): host is hard-pinned and the model name is validated against a
 // strict shape (no slashes/colons/path-traversal), so no input can redirect the key
 // to another host or path. encodeURIComponent prevents key injection into the URL.
-const GEMINI_HOST='https://generativelanguage.googleapis.com';
-const API_VER='v1beta';
-// Gemini 1.5 was retired by Google (Sep 2025). These are current Flash models, tried
-// in order; whichever works is remembered. If none match, the app asks the API which
-// models the key supports (discoverModel) and self-heals — so it survives future renames.
+// FreeLLMAPI backend integration
 const MODEL_CANDIDATES=['gemini-2.5-flash','gemini-2.0-flash','gemini-flash-latest','gemini-2.5-flash-lite','gemini-2.0-flash-lite'];
 // User-selectable models for the Settings dropdown. Quality is the tier; rpd is the
 // approximate FREE-tier requests/day (Google changes these — see their rate-limits page).
@@ -611,113 +588,83 @@ function reqSlot(){
   return _reqGate;
 }
 function safeModel(m){ if(!/^[a-zA-Z0-9.\-]+$/.test(String(m))) throw new Error('Invalid model name.'); return m; }
-function geminiUrl(model,key){
-  const u=`${GEMINI_HOST}/${API_VER}/models/${safeModel(model)}:generateContent?key=${encodeURIComponent(key)}`;
-  if(!u.startsWith(GEMINI_HOST+'/')) throw new Error('Refusing to contact a non-Gemini host.');
-  return u;
+
+// Model availability is assumed handled by the backend
+let availModels=null;
+
+async function discoverModel(){
+  availModels=new Set(MODEL_OPTIONS.map(m=>m.id));
+  return getModel();
 }
 
-// Ask the API which models this key can use (ListModels is a separate endpoint and
-// does NOT count against the per-model generateContent quota, so no bumpReq here).
-async function fetchSupportedModels(){
-  const key=getApiKey(); if(!key) throw new Error('No API key set.');
-  const url=`${GEMINI_HOST}/${API_VER}/models?pageSize=200&key=${encodeURIComponent(key)}`;
-  if(!url.startsWith(GEMINI_HOST+'/')) throw new Error('Refusing to contact a non-Gemini host.');
-  const res=await fetch(url);
-  if(!res.ok) throw new Error('Could not list models ('+res.status+').');
-  const j=await res.json();
-  return (j.models||[])
-    .filter(m=>(m.supportedGenerationMethods||[]).includes('generateContent'))
-    .map(m=>String(m.name||'').replace(/^models\//,''))
-    .filter(n=>/^[a-zA-Z0-9.\-]+$/.test(n));
-}
-// Pick a good Flash model from the supported list and remember it.
-async function discoverModel(){
-  const usable=await fetchSupportedModels();
-  availModels=new Set(usable);   // cache for the green/red dots
-  const bad=/embedding|aqa|vision|tts|image|audio|live|gemma/i;
-  const flash=usable.filter(n=>/flash/i.test(n) && !bad.test(n));
-  const rank=n=>(/(preview|exp)/i.test(n)?2:0)+(/lite/i.test(n)?1:0); // prefer stable, non-lite
-  flash.sort((a,b)=>rank(a)-rank(b));
-  const chosen=flash[0] || usable.find(n=>!bad.test(n)) || usable[0];
-  if(!chosen) throw new Error('No usable Gemini model found for this key.');
-  setModel(chosen); return chosen;
-}
-// Session cache of which models the key supports (for the green/red dots).
-let availModels=null;
 async function refreshAvailability(){
   const hint=$('#modelHint');
-  if(!getApiKey()){ availModels=null; renderModelList(); if(hint){hint.className='keystate warn';hint.textContent='Paste an API key to check availability.';} return; }
-  if(hint){ hint.className='keystate'; hint.innerHTML='<span class="spinner"></span> Checking which models your key can use…'; }
-  try{
-    availModels=new Set(await fetchSupportedModels());
-  }catch(e){ availModels=null; if(hint){hint.className='keystate warn';hint.textContent='Could not check availability: '+e.message;} renderModelList(); return; }
+  if(hint){ hint.className='keystate ok'; hint.textContent='Models are provided by the backend via FreeLLMAPI.'; }
+  availModels=new Set(MODEL_OPTIONS.map(m=>m.id));
   renderModelList(); updateModelHint();
 }
 
 // low-level call (no game-history, used for tests & one-shots)
 async function rawGemini(prompt,{system='',maxTokens=400,temperature=0.9,history=null}={}){
-  const key=getApiKey();
-  if(!key) throw new Error('No API key set. Open Settings and paste your Gemini key.');
-  const body={
-    contents: (history?history.slice():[]).concat([{role:'user',parts:[{text:String(prompt).slice(0,8000)}]}]),
-    generationConfig:{temperature,maxOutputTokens:maxTokens,topP:0.95}
+  let messages = [];
+  if (system) messages.push({role: 'system', content: String(system).slice(0,12000)});
+  if (history) {
+    for (let msg of history) {
+      let role = msg.role === 'model' ? 'assistant' : msg.role;
+      let content = msg.parts ? msg.parts.map(p=>p.text).join('') : (msg.content || '');
+      messages.push({role: role, content: content});
+    }
+  }
+  messages.push({role: 'user', content: String(prompt).slice(0,8000)});
+  
+  const body = {
+    messages: messages,
+    model: getModel(),
+    temperature: temperature,
+    max_tokens: maxTokens,
+    stream: false
   };
-  if(system) body.system_instruction={parts:[{text:String(system).slice(0,12000)}]};
-  async function callOnce(model){
-    // 2.5 FLASH models "think" by default and spend the output-token budget on hidden
-    // reasoning, truncating narration mid-sentence — disable it (faster/cheaper too).
-    // NOTE: only flash variants; 2.5 Pro requires a thinking budget, and 2.0 has none.
-    const b={...body, generationConfig:{...body.generationConfig}};
-    if(/2\.5/.test(model) && /flash/i.test(model)) b.generationConfig.thinkingConfig={thinkingBudget:0};
+
+  async function callOnce(){
     let res;
-    try{ res=await fetch(geminiUrl(model,key),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); }
-    catch(e){ throw new Error('Network error reaching Gemini.'); }
+    try{ res=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); }
+    catch(e){ throw new Error('Network error reaching backend.'); }
     bumpReq(); return res;
   }
-  // Retry ONLY transient overloads (503 "high demand"). Do NOT retry 429 — that's a
-  // rate/quota limit, and each retry burns another request from the (low) per-minute
-  // free-tier bucket, which only makes it worse.
-  async function call(model){
-    let res=await callOnce(model);
+  
+  async function call(){
+    let res=await callOnce();
     for(let attempt=0; !res.ok && res.status===503 && attempt<2; attempt++){
-      await sleep(1000*(attempt+1)+600);   // 1.6s, then 2.6s
-      res=await callOnce(model);
+      await sleep(1000*(attempt+1)+600);
+      res=await callOnce();
     }
     return res;
   }
-  await reqSlot();   // space requests out to respect the per-minute free-tier limit
-  let model=getModel();
-  let res=await call(model);
-  // self-heal: if the chosen model is gone/unsupported, discover a working one & retry once
-  if(!res.ok && (res.status===404 || res.status===400)){
-    let m=''; try{ m=(await res.clone().json()).error?.message||''; }catch(e){}
-    if(res.status===404 || /not found|not supported|does not exist|unsupported/i.test(m)){
-      try{ const nm=await discoverModel(); if(nm && nm!==model) res=await call(nm); }catch(e){}
-    }
-  }
+  
+  await reqSlot();
+  let res=await call();
+  
   if(!res.ok){
-    let g=''; try{ g=(await res.json()).error?.message||''; }catch(e){}
-    let msg=g||('Gemini error '+res.status);
-    if(res.status===503 || /overloaded|high demand|unavailable/i.test(g)){
-      msg='This model is busy (high demand) — it retried and still failed. Pick a lighter model in ⚙ Settings (Flash-Lite is far more available).';
-    } else if(res.status===429){
-      const perMin=/per minute|perminute|per-minute|requests per min/i.test(g);
-      msg = perMin
-        ? '⏳ Too many requests in a short burst (free-tier PER-MINUTE limit). Wait ~30–60 seconds, then continue — or switch model in ⚙ Settings (each model has its own bucket).'
-        : 'Daily free quota for this model is used up on Google\'s side. Switch model in ⚙ Settings (each has a separate daily allowance), or come back after midnight US-Pacific. ['+g.slice(0,90)+']';
+    let g=''; 
+    try{ 
+      const errJson = await res.json(); 
+      g = errJson.detail || errJson.error?.message || errJson.error || errJson; 
+    } catch(e) {
+      try { g = await res.text(); } catch(e2) {}
     }
-    else if(res.status===400 && /API key/i.test(g)) msg='Invalid API key.';
-    else if(res.status===404) msg='No supported Gemini model found for this key. Try "Test key" in Settings.';
+    if (typeof g === 'object') g = JSON.stringify(g);
+    let msg=g||('Backend error '+res.status);
     throw new Error(msg);
   }
+  
   const j=await res.json();
-  const cand=j.candidates?.[0];
-  let txt=(cand?.content?.parts?.map(p=>p.text).join('')||'').trim();
-  if(!txt) throw new Error('Gemini returned no text (possibly blocked).');
+  const choice=j.choices?.[0];
+  let txt=(choice?.message?.content||'').trim();
+  if(!txt) throw new Error('Backend returned no text (possibly blocked).');
+  
   // If a reply was still cut at the token cap, trim back to the last complete sentence
   // so it never ends mid-word (avoids the "...watches your arrival with" effect).
-  if(cand?.finishReason==='MAX_TOKENS'){
+  if(choice?.finish_reason==='length' || choice?.finish_reason==='MAX_TOKENS'){
     const m=txt.match(/^[\s\S]*[.!?…"'’”)\]]/);
     if(m && m[0].length>=txt.length*0.5) txt=m[0].trim();
   }
@@ -1121,11 +1068,7 @@ This is a ${STYLE_DEFS[style].label} experience.`;
    START / SAVE / LOAD
    ==================================================================== */
 function startGame(){
-  if(!getApiKey()){
-    confirmModal('No API key set','You need a Gemini API key to play. Open Settings and paste one in.',
-      [{t:'Open Settings',cls:'primary',fn:()=>{hideOverlay();openSettings();}},{t:'Cancel',fn:hideOverlay}]);
-    return;
-  }
+
   const realm=buildRealmConfig();
   const styleDef=STYLE_DEFS[sel.style];
   const heroName=($('#heroName').value.trim().slice(0,40))||pick(HERO_NAMES);
