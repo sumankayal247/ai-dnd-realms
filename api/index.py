@@ -1,11 +1,12 @@
 import os
+from pathlib import Path
 from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from starlette.responses import StreamingResponse
+from starlette.responses import FileResponse, StreamingResponse
 
 app = FastAPI(title="AI DnD Realms API", version="1.0.0")
 
@@ -22,6 +23,7 @@ app.add_middleware(
 FREELLMAPI_URL = os.getenv("FREELLMAPI_URL", "http://127.0.0.1:8080").rstrip("/")
 FREELLMAPI_API_KEY = os.getenv("FREELLMAPI_API_KEY", "")
 DEFAULT_MODEL = os.getenv("FREELLMAPI_MODEL", "auto")
+INDEX_FILE = Path(__file__).resolve().parent.parent / "index.html"
 
 
 class ChatRequest(BaseModel):
@@ -30,6 +32,13 @@ class ChatRequest(BaseModel):
     temperature: float | None = Field(default=None, ge=0, le=2)
     max_tokens: int | None = Field(default=None, ge=1, le=8192)
     stream: bool = False
+
+
+@app.get("/")
+async def frontend() -> FileResponse:
+    if not INDEX_FILE.exists():
+        raise HTTPException(status_code=500, detail="Frontend index.html is missing")
+    return FileResponse(INDEX_FILE, media_type="text/html")
 
 
 @app.get("/api/health")
