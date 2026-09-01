@@ -6,7 +6,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from starlette.responses import FileResponse, StreamingResponse
+from starlette.responses import FileResponse, HTMLResponse, StreamingResponse
 
 app = FastAPI(title="AI DnD Realms API", version="1.0.0")
 
@@ -35,10 +35,29 @@ class ChatRequest(BaseModel):
 
 
 @app.get("/")
-async def frontend() -> FileResponse:
+async def frontend() -> HTMLResponse:
     if not INDEX_FILE.exists():
         raise HTTPException(status_code=500, detail="Frontend index.html is missing")
-    return FileResponse(INDEX_FILE, media_type="text/html")
+
+    # Previous behavior returned the source file directly:
+    # return FileResponse(INDEX_FILE, media_type="text/html")
+    # Keep the single-file frontend intact, but remove the obsolete model selector
+    # from the deployed UI and make the browser use backend-owned routing.
+    html = INDEX_FILE.read_text(encoding="utf-8")
+    frontend_patch = """
+<style id="backend-model-routing-ui">
+  /* Model selection is backend-owned; keep the controls out of the player UI. */
+  .field:has(#modelList) { display: none !important; }
+</style>
+<script>
+  // The backend chooses the actual provider/model. Ignore any legacy local model choice.
+  window.getModel = function(){ return 'auto'; };
+  window.setModel = function(){};
+  window.renderModelList = function(){};
+</script>
+"""
+    html = html.replace("</head>", frontend_patch + "</head>", 1)
+    return HTMLResponse(content=html, media_type="text/html")
 
 
 @app.get("/api/health")
