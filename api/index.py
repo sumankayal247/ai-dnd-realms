@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -6,12 +7,10 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from starlette.responses import FileResponse, HTMLResponse, StreamingResponse
+from starlette.responses import HTMLResponse, StreamingResponse
 
 app = FastAPI(title="AI DnD Realms API", version="1.0.0")
 
-# Same-origin deployment on Vercel does not need CORS, but keeping this permissive
-# for local development makes the API easy to test from a local static server.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
@@ -39,18 +38,12 @@ async def frontend() -> HTMLResponse:
     if not INDEX_FILE.exists():
         raise HTTPException(status_code=500, detail="Frontend index.html is missing")
 
-    # Previous behavior returned the source file directly:
-    # return FileResponse(INDEX_FILE, media_type="text/html")
-    # Keep the single-file frontend intact, but remove the obsolete model selector
-    # from the deployed UI and make the browser use backend-owned routing.
     html = INDEX_FILE.read_text(encoding="utf-8")
     frontend_patch = """
 <style id="backend-model-routing-ui">
-  /* Model selection is backend-owned; keep the controls out of the player UI. */
   .field:has(#modelList) { display: none !important; }
 </style>
 <script>
-  // The backend chooses the actual provider/model. Ignore any legacy local model choice.
   window.getModel = function(){ return 'auto'; };
   window.setModel = function(){};
   window.renderModelList = function(){};
@@ -70,15 +63,61 @@ async def health() -> dict[str, Any]:
     }
 
 
+# Defensive output filter. The game must display only final in-world narration,
+# never a provider's analysis, chain-of-thought, prompt reconstruction, or meta text.
+_REASONING_MARKERS = re.compile(
+    r"(?is)(?:^|\n)\s*(?:here(?:'s| is)\s+(?:a\s+)?(?:thinking|reasoning)\s+process|"
+    r"thinking\s+process\s*:|chain[- ]of[- ]thought\s*:|analysis\s*:|"
+    r"check\s+constraints\s*:|analyze\s+user\s+input\s*:|final\s+answer\s*:).*?(?=\n\s*(?:sable\s*:|narration\s*:|scene\s*:)|\Z)"
+)
+
+
+def sanitize_narration(text: str) -> str:
+    """Return player-visible narration without leaked reasoning/meta-instructions."""
+    text = str(text or "").strip()
+    if not text:
+        return text
+
+    # Remove fenced/internal reasoning sections first.
+    text = re.sub(r"(?is)<think>.*?</think>", "", text)
+    text = re.sub(r"(?is)<analysis>.*?</analysis>", "", text)
+    text = _REASONING_MARKERS.sub("", text).strip()
+
+    # If a model prefixes its actual output with common meta labels, keep only
+    # the player-facing portion after the label.
+    text = re.sub(r"(?is)^\s*(?:final\s+response|narration|scene)\s*:\s*", "", text).strip()
+    return text
+
+
+def sanitize_response(data: Any) -> Any:
+    """Sanitize OpenAI-compatible chat completion message content recursively."""
+    if isinstance(data, dict):
+        result = dict(data)
+        choices = result.get("choices")
+        if isinstance(choices, list):
+            new_choices = []
+            for choice in choices:
+                item = dict(choice) if isinstance(choice, dict) else choice
+                if isinstance(item, dict) and isinstance(item.get("message"), dict):
+                    msg = dict(item["message"])
+                    if "content" in msg:
+                        msg["content"] = sanitize_narration(msg["content"])
+                    item["message"] = msg
+                if isinstance(item, dict) and isinstance(item.get("text"), str):
+                    item["text"] = sanitize_narration(item["text"])
+                new_choices.append(item)
+            result["choices"] = new_choices
+        return result
+    return data
+
+
 @app.post("/api/chat")
 async def chat(payload: ChatRequest, request: Request):
     if not FREELLMAPI_API_KEY:
         raise HTTPException(status_code=500, detail="FREELLMAPI_API_KEY is not configured")
 
-    # Previous behavior allowed the browser to select the upstream model:
-    # "model": payload.model or DEFAULT_MODEL,
-    # The backend now owns model selection so stale/removed frontend model IDs
-    # can never override the FreeLLMAPI routing configuration.
+    # The browser cannot choose the provider/model. FreeLLMAPI/backend routing
+    # decides which available AI handles the request.
     body: dict[str, Any] = {
         "model": DEFAULT_MODEL,
         "messages": payload.messages,
@@ -93,7 +132,6 @@ async def chat(payload: ChatRequest, request: Request):
         "Authorization": f"Bearer {FREELLMAPI_API_KEY}",
         "Content-Type": "application/json",
     }
-
     url = f"{FREELLMAPI_URL}/v1/chat/completions"
 
     if payload.stream:
@@ -121,7 +159,6 @@ async def chat(payload: ChatRequest, request: Request):
         raise HTTPException(status_code=502, detail=f"Unable to reach FreeLLMAPI: {exc}") from exc
 
     if response.status_code >= 400:
-        # Preserve the upstream status while avoiding exposure of our server-side key.
         raise HTTPException(status_code=response.status_code, detail=response.text)
 
-    return response.json()
+    return sanitize_response(response.json())
