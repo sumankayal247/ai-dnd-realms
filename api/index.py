@@ -56,8 +56,12 @@ async def chat(payload: ChatRequest, request: Request):
     if not FREELLMAPI_API_KEY:
         raise HTTPException(status_code=500, detail="FREELLMAPI_API_KEY is not configured")
 
+    # Previous behavior allowed the browser to select the upstream model:
+    # "model": payload.model or DEFAULT_MODEL,
+    # The backend now owns model selection so stale/removed frontend model IDs
+    # can never override the FreeLLMAPI routing configuration.
     body: dict[str, Any] = {
-        "model": payload.model or DEFAULT_MODEL,
+        "model": DEFAULT_MODEL,
         "messages": payload.messages,
         "stream": payload.stream,
     }
