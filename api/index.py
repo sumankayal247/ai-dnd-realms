@@ -50,6 +50,76 @@ async def frontend() -> HTMLResponse:
 </script>
 """
     html = html.replace("</head>", frontend_patch + "</head>", 1)
+
+    rest_patch = """
+<script id="paid-rest-mechanic">
+(function(){
+  function installPaidRest(){
+    if(typeof buildActions !== 'function' || typeof btn !== 'function') return;
+    if(window.__paidRestInstalled) return;
+    window.__paidRestInstalled = true;
+
+    const originalBuildActions = buildActions;
+    buildActions = function(room){
+      originalBuildActions(room);
+      addRestAction(room);
+    };
+
+    function addRestAction(room){
+      if(!room || (room.type !== 'entrance' && room.type !== 'hub')) return;
+      if(typeof state === 'undefined' || state.mode !== 'explore') return;
+
+      const actions = document.querySelector('#actions');
+      if(!actions || actions.querySelector('[data-action="rest"]')) return;
+
+      const restButton = btn('🌙 Rest — 1–2 gold', restAtSafeSpace, 'small');
+      restButton.dataset.action = 'rest';
+      actions.appendChild(restButton);
+    }
+
+    function restAtSafeSpace(){
+      if(typeof state === 'undefined') return;
+      if(state.mode !== 'explore'){
+        if(typeof flash === 'function') flash('You cannot rest during combat.');
+        return;
+      }
+
+      const room = state.map && state.map.rooms ? state.map.rooms[state.currentId] : null;
+      if(!room || (room.type !== 'entrance' && room.type !== 'hub')){
+        if(typeof flash === 'function') flash('This is not a safe place to rest.');
+        return;
+      }
+
+      const cost = Math.random() < 0.5 ? 1 : 2;
+      const player = state.player;
+      if(player.gold < cost){
+        if(typeof flash === 'function') flash('Not enough gold for a room tonight (need '+cost+' gold).');
+        return;
+      }
+
+      player.gold -= cost;
+      player.hp = player.maxHp;
+      state.updatedAt = Date.now();
+      state.steps = (state.steps || 0) + 1;
+
+      if(typeof addEntry === 'function'){
+        addEntry('heal', '🌙 You rent a room for the night. After a peaceful rest, your wounds are fully healed.');
+        addEntry('sys', 'You spend '+cost+' gold. A new day begins.');
+      }
+      if(typeof renderStats === 'function') renderStats();
+      if(typeof renderInv === 'function') renderInv();
+      if(typeof autosave === 'function') autosave();
+      buildActions(room);
+    }
+  }
+
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', installPaidRest);
+  else installPaidRest();
+  setTimeout(installPaidRest, 0);
+})();
+</script>
+"""
+    html = html.replace("</body>", rest_patch + "</body>", 1)
     return HTMLResponse(content=html, media_type="text/html")
 
 
@@ -78,13 +148,9 @@ def sanitize_narration(text: str) -> str:
     if not text:
         return text
 
-    # Remove fenced/internal reasoning sections first.
     text = re.sub(r"(?is)<think>.*?</think>", "", text)
     text = re.sub(r"(?is)<analysis>.*?</analysis>", "", text)
     text = _REASONING_MARKERS.sub("", text).strip()
-
-    # If a model prefixes its actual output with common meta labels, keep only
-    # the player-facing portion after the label.
     text = re.sub(r"(?is)^\s*(?:final\s+response|narration|scene)\s*:\s*", "", text).strip()
     return text
 
