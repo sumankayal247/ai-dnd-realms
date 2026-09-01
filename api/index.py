@@ -60,26 +60,67 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
 async def health() -> dict[str, Any]:
     return {"ok": True, "provider": "freellmapi", "configured": bool(FREELLMAPI_API_KEY), "model": DEFAULT_MODEL}
 
-_REASONING_MARKERS = re.compile(r"(?is)(?:^|\n)\s*(?:here(?:'s| is)\s+(?:a\s+)?(?:thinking|reasoning)\s+process|thinking\s+process\s*:|chain[- ]of[- ]thought\s*:|analysis\s*:|check\s+constraints\s*:|analyze\s+user\s+input\s*:|final\s+answer\s*:).*?(?=\n\s*(?:sable\s*:|narration\s*:|scene\s*:)|\Z)")
 def sanitize_narration(text: str) -> str:
-    text=str(text or "").strip()
-    if not text:return text
-    text=re.sub(r"(?is)<think>.*?</think>","",text);text=re.sub(r"(?is)<analysis>.*?</analysis>","",text);text=_REASONING_MARKERS.sub("",text).strip();return re.sub(r"(?is)^\s*(?:final\s+response|narration|scene)\s*:\s*","",text).strip()
+    """Remove only explicit reasoning markup; never discard valid narration."""
+    original = str(text or "").strip()
+    if not original:
+        return original
+    cleaned = re.sub(r"(?is)<think>.*?</think>", "", original)
+    cleaned = re.sub(r"(?is)<analysis>.*?</analysis>", "", cleaned)
+    # Remove a standalone reasoning preamble only when a clear narration section follows.
+    match = re.search(r"(?is)(?:^|\n)\s*(?:here(?:'s| is)\s+(?:a\s+)?(?:thinking|reasoning)\s+process|thinking\s+process\s*:|chain[- ]of[- ]thought\s*:|analyze\s+user\s+input\s*:|check\s+constraints\s*:).*?(?=\n\s*(?:narration\s*:|scene\s*:))", cleaned)
+    if match:
+        cleaned = cleaned[:match.start()] + cleaned[match.end():]
+    cleaned = re.sub(r"(?is)^\s*(?:final\s+response|narration|scene)\s*:\s*", "", cleaned).strip()
+    # Safety fallback: filtering must never turn a usable provider response into nothing.
+    return cleaned or original
+
 def sanitize_response(data: Any) -> Any:
-    if not isinstance(data,dict):return data
-    result=dict(data);choices=result.get("choices")
-    if isinstance(choices,list):
-        out=[]
+    if not isinstance(data, dict):
+        return data
+    result = dict(data)
+    choices = result.get("choices")
+    if isinstance(choices, list):
+        out = []
         for choice in choices:
-            item=dict(choice) if isinstance(choice,dict) else choice
-            if isinstance(item,dict) and isinstance(item.get("message"),dict):
-                msg=dict(item["message"])
-                if "content" in msg:msg["content"]=sanitize_narration(msg["content"])
-                item["message"]=msg
-            if isinstance(item,dict) and isinstance(item.get("text"),str):item["text"]=sanitize_narration(item["text"])
+            item = dict(choice) if isinstance(choice, dict) else choice
+            if isinstance(item, dict) and isinstance(item.get("message"), dict):
+                msg = dict(item["message"])
+                if isinstance(msg.get("content"), str):
+                    msg["content"] = sanitize_narration(msg["content"])
+                item["message"] = msg
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                item["text"] = sanitize_narration(item["text"])
             out.append(item)
-        result["choices"]=out
+        result["choices"] = out
+    if isinstance(result.get("output_text"), str):
+        result["output_text"] = sanitize_narration(result["output_text"])
     return result
+
+def sanitize_sse_chunk(chunk: bytes) -> bytes:
+    """Sanitize completed SSE data payloads without buffering or corrupting the stream."""
+    try:
+        text = chunk.decode("utf-8")
+    except UnicodeDecodeError:
+        return chunk
+    lines = []
+    for line in text.splitlines(keepends=True):
+        if not line.startswith("data: "):
+            lines.append(line)
+            continue
+        payload_text = line[6:].rstrip("\r\n")
+        if payload_text == "[DONE]":
+            lines.append(line)
+            continue
+        try:
+            import json
+            payload = json.loads(payload_text)
+            payload = sanitize_response(payload)
+            newline = "\n" if line.endswith("\n") else ""
+            lines.append("data: " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + newline)
+        except (ValueError, TypeError):
+            lines.append(line)
+    return "".join(lines).encode("utf-8")
 
 @app.post("/api/chat")
 async def chat(payload: ChatRequest, request: Request):
@@ -94,7 +135,8 @@ async def chat(payload: ChatRequest, request: Request):
             async with httpx.AsyncClient(timeout=timeout) as client:
                 async with client.stream("POST",url,json=body,headers=headers) as response:
                     if response.status_code>=400:raise RuntimeError(f"FreeLLMAPI returned {response.status_code}: {(await response.aread()).decode('utf-8',errors='replace')}")
-                    async for chunk in response.aiter_bytes():yield chunk
+                    async for chunk in response.aiter_bytes():
+                        yield sanitize_sse_chunk(chunk)
         return StreamingResponse(stream_response(),media_type="text/event-stream",headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
     try:
         timeout=httpx.Timeout(connect=10.0,read=120.0,write=30.0,pool=10.0)
