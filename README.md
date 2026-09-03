@@ -32,7 +32,7 @@ The FreeLLMAPI server is used as the upstream OpenAI-compatible AI gateway. The 
 The backend expects these environment variables:
 
 ```env
-FREELLMAPI_URL=https://freellmapi-dnd.onrender.com
+FREELLMAPI_URL=https://**********-***.onrender.com
 FREELLMAPI_API_KEY=<your FreeLLMAPI unified key>
 FREELLMAPI_MODEL=auto
 ```
