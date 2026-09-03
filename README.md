@@ -20,7 +20,7 @@ Vercel /api/chat
 AI DnD FastAPI backend
    ↓
 FreeLLMAPI
-https://freellmapi-dnd.onrender.com/v1/chat/completions
+https://**********-***.onrender.com/v1/chat/completions
    ↓
 Configured AI provider/model
 ```
