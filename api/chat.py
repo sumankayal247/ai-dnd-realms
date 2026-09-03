@@ -7,12 +7,20 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="AI DnD Realms Chat API", version="1.2.0")
+app = FastAPI(title="AI DnD Realms Chat API", version="1.3.0")
 CORS_ORIGINS = [x.strip() for x in os.getenv("CORS_ORIGINS", "*").split(",") if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS or ["*"], allow_credentials=False, allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["*"])
+
+# Accept either a provider base URL or an OpenAI-compatible /v1 URL in the environment.
+# This prevents accidental /v1/v1/chat/completions routing, which commonly surfaces as 405.
 FREELLMAPI_URL = os.getenv("FREELLMAPI_URL", "http://127.0.0.1:8080").rstrip("/")
+for suffix in ("/v1/chat/completions", "/v1"):
+    if FREELLMAPI_URL.lower().endswith(suffix):
+        FREELLMAPI_URL = FREELLMAPI_URL[: -len(suffix)].rstrip("/")
+        break
 FREELLMAPI_API_KEY = os.getenv("FREELLMAPI_API_KEY", "")
 DEFAULT_MODEL = os.getenv("FREELLMAPI_MODEL", "auto")
+UPSTREAM_CHAT_PATH = "/v1/chat/completions"
 
 ECONOMY_PROTOCOL = """GAME ECONOMY PROTOCOL — NPC CONVERSATIONS:
 You are controlling an NPC in a game. The game engine, not the prose, owns inventory, gold, prices, and equipment.
@@ -31,19 +39,61 @@ class ChatRequest(BaseModel):
     max_tokens: int | None = Field(default=None, ge=1, le=8192)
     stream: bool = False
 
+
+def safe_provider_url() -> str:
+    """Return a diagnostic-safe provider URL without credentials or query strings."""
+    return FREELLMAPI_URL
+
+
+def upstream_error(response: httpx.Response) -> HTTPException:
+    detail = response.text.strip()
+    if len(detail) > 1200:
+        detail = detail[:1200] + "…"
+    status = response.status_code
+    return HTTPException(
+        status_code=502,
+        detail={
+            "stage": "upstream",
+            "status": status,
+            "message": f"FreeLLMAPI rejected POST {UPSTREAM_CHAT_PATH} with HTTP {status}.",
+            "endpoint": f"{safe_provider_url()}{UPSTREAM_CHAT_PATH}",
+            "upstream_response": detail or "<empty response>",
+            "hint": "Check FREELLMAPI_URL and confirm the provider exposes an OpenAI-compatible POST /v1/chat/completions endpoint.",
+        },
+    )
+
+
 async def call_upstream(payload: dict[str, Any]):
     if not FREELLMAPI_API_KEY:
-        raise HTTPException(status_code=500, detail="FREELLMAPI_API_KEY is not configured")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "stage": "configuration",
+                "status": 503,
+                "message": "FREELLMAPI_API_KEY is not configured on the backend.",
+            },
+        )
     headers={"Authorization":f"Bearer {FREELLMAPI_API_KEY}","Content-Type":"application/json"}
     timeout=httpx.Timeout(connect=10, read=120, write=30, pool=10)
+    endpoint=f"{FREELLMAPI_URL}{UPSTREAM_CHAT_PATH}"
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response=await client.post(f"{FREELLMAPI_URL}/v1/chat/completions",json=payload,headers=headers)
+            response=await client.post(endpoint,json=payload,headers=headers)
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Unable to reach FreeLLMAPI: {exc}") from exc
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "stage": "upstream",
+                "status": 502,
+                "message": "Backend could not reach FreeLLMAPI.",
+                "endpoint": endpoint,
+                "error": str(exc),
+            },
+        ) from exc
     if response.status_code >= 400:
-        raise HTTPException(status_code=response.status_code, detail=response.text)
+        raise upstream_error(response)
     return response
+
 
 def add_protocol(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out=[dict(m) for m in messages]
@@ -53,11 +103,13 @@ def add_protocol(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             return out
     return [{"role":"system","content":ECONOMY_PROTOCOL}]+out
 
+
 def clean_content(text: str) -> str:
     text=re.sub(r"(?is)<think>.*?</think>","",str(text or ""))
     text=re.sub(r"(?is)<analysis>.*?</analysis>","",text)
     text=re.sub(r"(?is)^\s*(?:final\s+(?:answer|response)|narration|scene)\s*:\s*", "", text, count=1)
     return text.strip()
+
 
 def extract_text(data: Any) -> str:
     if not isinstance(data, dict):
@@ -104,6 +156,7 @@ def extract_text(data: Any) -> str:
             return clean_content("".join(parts))
     return ""
 
+
 @app.post("/")
 @app.post("/api/chat")
 async def chat(payload: ChatRequest):
@@ -114,10 +167,10 @@ async def chat(payload: ChatRequest):
     try:
         data=response.json()
     except ValueError as exc:
-        raise HTTPException(status_code=502, detail="AI provider returned invalid JSON") from exc
+        raise HTTPException(status_code=502, detail={"stage":"upstream","status":502,"message":"FreeLLMAPI returned invalid JSON","endpoint":f"{safe_provider_url()}{UPSTREAM_CHAT_PATH}"}) from exc
     text=extract_text(data)
     if not text:
-        raise HTTPException(status_code=502, detail="AI provider returned no final narration text")
+        raise HTTPException(status_code=502, detail={"stage":"upstream","status":502,"message":"FreeLLMAPI returned no final narration text","endpoint":f"{safe_provider_url()}{UPSTREAM_CHAT_PATH}"})
     if isinstance(data,dict) and isinstance(data.get("choices"),list) and data["choices"]:
         first=data["choices"][0]
         if isinstance(first,dict):
@@ -131,7 +184,17 @@ async def chat(payload: ChatRequest):
             return data
     return {"choices":[{"message":{"role":"assistant","content":text}}],"model":payload.model or DEFAULT_MODEL}
 
+
 @app.get("/health")
 @app.get("/api/health")
 async def health():
-    return {"ok":True,"provider":"freellmapi","configured":bool(FREELLMAPI_API_KEY),"model":DEFAULT_MODEL}
+    return {
+        "ok": True,
+        "stage": "backend",
+        "provider": "freellmapi",
+        "configured": bool(FREELLMAPI_API_KEY),
+        "model": DEFAULT_MODEL,
+        "upstream_base": safe_provider_url(),
+        "chat_endpoint": f"{safe_provider_url()}{UPSTREAM_CHAT_PATH}",
+        "cors": CORS_ORIGINS,
+    }
