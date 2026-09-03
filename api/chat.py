@@ -4,9 +4,12 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="AI DnD Realms Chat API", version="1.1.0")
+app = FastAPI(title="AI DnD Realms Chat API", version="1.2.0")
+CORS_ORIGINS = [x.strip() for x in os.getenv("CORS_ORIGINS", "*").split(",") if x.strip()]
+app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS or ["*"], allow_credentials=False, allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["*"])
 FREELLMAPI_URL = os.getenv("FREELLMAPI_URL", "http://127.0.0.1:8080").rstrip("/")
 FREELLMAPI_API_KEY = os.getenv("FREELLMAPI_API_KEY", "")
 DEFAULT_MODEL = os.getenv("FREELLMAPI_MODEL", "auto")
@@ -53,7 +56,6 @@ def add_protocol(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def clean_content(text: str) -> str:
     text=re.sub(r"(?is)<think>.*?</think>","",str(text or ""))
     text=re.sub(r"(?is)<analysis>.*?</analysis>","",text)
-    # Remove only obvious leading labels; never greedily delete the answer.
     text=re.sub(r"(?is)^\s*(?:final\s+(?:answer|response)|narration|scene)\s*:\s*", "", text, count=1)
     return text.strip()
 
@@ -102,17 +104,20 @@ def extract_text(data: Any) -> str:
             return clean_content("".join(parts))
     return ""
 
+@app.post("/")
 @app.post("/api/chat")
 async def chat(payload: ChatRequest):
-    body={"model":DEFAULT_MODEL,"messages":add_protocol(payload.messages),"stream":False}
+    body={"model":payload.model or DEFAULT_MODEL,"messages":add_protocol(payload.messages),"stream":False}
     if payload.temperature is not None: body["temperature"]=payload.temperature
     if payload.max_tokens is not None: body["max_tokens"]=payload.max_tokens
     response=await call_upstream(body)
-    data=response.json()
+    try:
+        data=response.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail="AI provider returned invalid JSON") from exc
     text=extract_text(data)
     if not text:
         raise HTTPException(status_code=502, detail="AI provider returned no final narration text")
-    # Return the OpenAI-compatible shape expected by the existing frontend.
     if isinstance(data,dict) and isinstance(data.get("choices"),list) and data["choices"]:
         first=data["choices"][0]
         if isinstance(first,dict):
@@ -124,8 +129,9 @@ async def chat(payload: ChatRequest):
             else:
                 first["message"]={"role":"assistant","content":text}
             return data
-    return {"choices":[{"message":{"role":"assistant","content":text}}],"model":DEFAULT_MODEL}
+    return {"choices":[{"message":{"role":"assistant","content":text}}],"model":payload.model or DEFAULT_MODEL}
 
+@app.get("/health")
 @app.get("/api/health")
 async def health():
     return {"ok":True,"provider":"freellmapi","configured":bool(FREELLMAPI_API_KEY),"model":DEFAULT_MODEL}
