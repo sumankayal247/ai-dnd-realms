@@ -4,6 +4,7 @@ import {director,fallback} from './ai.js';
 import {createRenderer} from './renderer.js';
 import {saveSlot,loadSlot} from './persistence.js';
 import {createWorldSystems} from './systems.js';
+import './selftest.js';
 
 let state=load()||initialState();let engine;let systems;
 const $=id=>document.getElementById(id);
