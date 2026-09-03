@@ -10,11 +10,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.responses import HTMLResponse, StreamingResponse
 
-app = FastAPI(title="AI DnD Realms API", version="1.0.0")
+app = FastAPI(title="AI DnD Realms API", version="1.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "*").split(","), allow_credentials=False, allow_methods=["POST", "GET", "OPTIONS"], allow_headers=["*"])
 FREELLMAPI_URL = os.getenv("FREELLMAPI_URL", "http://127.0.0.1:8080").rstrip("/")
+for suffix in ("/v1/chat/completions", "/v1"):
+    if FREELLMAPI_URL.lower().endswith(suffix):
+        FREELLMAPI_URL = FREELLMAPI_URL[: -len(suffix)].rstrip("/")
+        break
 FREELLMAPI_API_KEY = os.getenv("FREELLMAPI_API_KEY", "")
 DEFAULT_MODEL = os.getenv("FREELLMAPI_MODEL", "auto")
+UPSTREAM_CHAT_PATH = "/v1/chat/completions"
 INDEX_FILE = Path(__file__).resolve().parent.parent / "index.html"
 
 class ChatRequest(BaseModel):
@@ -23,6 +28,24 @@ class ChatRequest(BaseModel):
     temperature: float | None = Field(default=None, ge=0, le=2)
     max_tokens: int | None = Field(default=None, ge=1, le=8192)
     stream: bool = False
+
+
+def endpoint() -> str:
+    return f"{FREELLMAPI_URL}{UPSTREAM_CHAT_PATH}"
+
+
+def provider_error(status: int, body: str) -> HTTPException:
+    body = (body or "").strip()
+    if len(body) > 1200:
+        body = body[:1200] + "…"
+    return HTTPException(status_code=502, detail={
+        "stage": "upstream",
+        "status": status,
+        "message": f"FreeLLMAPI rejected POST {UPSTREAM_CHAT_PATH} with HTTP {status}.",
+        "endpoint": endpoint(),
+        "upstream_response": body or "<empty response>",
+        "hint": "Check FREELLMAPI_URL and confirm the provider exposes POST /v1/chat/completions.",
+    })
 
 @app.get("/")
 async def frontend() -> HTMLResponse:
@@ -59,11 +82,16 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "provider": "freellmapi", "configured": bool(FREELLMAPI_API_KEY), "model": DEFAULT_MODEL}
+    return {
+        "ok": True,
+        "stage": "backend",
+        "provider": "freellmapi",
+        "configured": bool(FREELLMAPI_API_KEY),
+        "model": DEFAULT_MODEL,
+        "upstream_base": FREELLMAPI_URL,
+        "chat_endpoint": endpoint(),
+    }
 
-# Strong backend-level instruction prevents the upstream model from spending its
-# visible completion on a fake "thinking process" even when the game prompt asks
-# for internal planning. The player must receive only final in-world narration.
 NARRATION_GUARD = (
     "IMPORTANT OUTPUT RULE: Return ONLY the final player-visible in-world response. "
     "Never output or describe your reasoning, analysis, chain of thought, planning, "
@@ -76,94 +104,89 @@ def guarded_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{"role": "system", "content": NARRATION_GUARD}] + list(messages)
 
 def sanitize_narration(text: str) -> str:
-    """Remove leaked reasoning without ever deleting normal game narration."""
     original = str(text or "").strip()
-    if not original:
-        return original
+    if not original: return original
     cleaned = re.sub(r"(?is)<think>.*?</think>", "", original)
     cleaned = re.sub(r"(?is)<analysis>.*?</analysis>", "", cleaned)
-
-    # If the provider included a reasoning preamble followed by an explicit final
-    # section, keep only that final section.
-    final_match = re.search(
-        r"(?is)(?:^|\n)\s*(?:final\s+(?:answer|response)|narration|scene)\s*:\s*(.+)$",
-        cleaned,
-    )
-    if final_match:
-        cleaned = final_match.group(1).strip()
+    final_match = re.search(r"(?is)(?:^|\n)\s*(?:final\s+(?:answer|response)|narration|scene)\s*:\s*(.+)$", cleaned)
+    if final_match: cleaned = final_match.group(1).strip()
     else:
-        # Remove common reasoning-only prefixes line-by-line. Do not use a greedy
-        # regex that can consume the actual narration.
         lines = cleaned.splitlines()
-        while lines and re.match(
-            r"(?is)^\s*(?:here(?:'s| is)\s+(?:a\s+)?(?:thinking|reasoning)\s+process|thinking\s+process\s*:|chain[- ]of[- ]thought\s*:|analyze\s+user\s+input\s*:|check\s+constraints\s*:)",
-            lines[0],
-        ):
-            lines.pop(0)
+        while lines and re.match(r"(?is)^\s*(?:here(?:'s| is)\s+(?:a\s+)?(?:thinking|reasoning)\s+process|thinking\s+process\s*:|chain[- ]of[- ]thought\s*:|analyze\s+user\s+input\s*:|check\s+constraints\s*:)", lines[0]): lines.pop(0)
         cleaned = "\n".join(lines).strip()
-
     cleaned = re.sub(r"(?im)^\s*(?:final\s+response|final\s+answer|narration|scene)\s*:\s*", "", cleaned).strip()
-    # Never return an empty response merely because filtering matched something.
     return cleaned or original
 
 def sanitize_response(data: Any) -> Any:
     if not isinstance(data, dict): return data
-    result = dict(data)
-    choices = result.get("choices")
+    result = dict(data); choices = result.get("choices")
     if isinstance(choices, list):
-        out = []
+        out=[]
         for choice in choices:
-            item = dict(choice) if isinstance(choice, dict) else choice
-            if isinstance(item, dict) and isinstance(item.get("message"), dict):
-                msg = dict(item["message"])
-                if isinstance(msg.get("content"), str): msg["content"] = sanitize_narration(msg["content"])
-                item["message"] = msg
-            if isinstance(item, dict) and isinstance(item.get("text"), str): item["text"] = sanitize_narration(item["text"])
+            item=dict(choice) if isinstance(choice,dict) else choice
+            if isinstance(item,dict) and isinstance(item.get("message"),dict):
+                msg=dict(item["message"])
+                if isinstance(msg.get("content"),str): msg["content"]=sanitize_narration(msg["content"])
+                item["message"]=msg
+            if isinstance(item,dict) and isinstance(item.get("text"),str): item["text"]=sanitize_narration(item["text"])
             out.append(item)
-        result["choices"] = out
-    if isinstance(result.get("output_text"), str): result["output_text"] = sanitize_narration(result["output_text"])
+        result["choices"]=out
+    if isinstance(result.get("output_text"),str): result["output_text"]=sanitize_narration(result["output_text"])
     return result
 
 def sanitize_sse_chunk(chunk: bytes) -> bytes:
-    try: text = chunk.decode("utf-8")
+    try: text=chunk.decode("utf-8")
     except UnicodeDecodeError: return chunk
-    lines = []
+    lines=[]
     for line in text.splitlines(keepends=True):
-        if not line.startswith("data: "):
-            lines.append(line); continue
-        payload_text = line[6:].rstrip("\r\n")
-        if payload_text == "[DONE]": lines.append(line); continue
+        if not line.startswith("data: "): lines.append(line); continue
+        payload_text=line[6:].rstrip("\r\n")
+        if payload_text=="[DONE]": lines.append(line); continue
         try:
-            payload = json.loads(payload_text)
-            payload = sanitize_response(payload)
-            newline = "\n" if line.endswith("\n") else ""
-            lines.append("data: " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + newline)
-        except (ValueError, TypeError): lines.append(line)
+            payload=sanitize_response(json.loads(payload_text)); newline="\n" if line.endswith("\n") else ""
+            lines.append("data: "+json.dumps(payload,ensure_ascii=False,separators=(",", ":"))+newline)
+        except (ValueError,TypeError): lines.append(line)
     return "".join(lines).encode("utf-8")
+
+async def upstream_post(body: dict[str, Any]) -> httpx.Response:
+    if not FREELLMAPI_API_KEY:
+        raise HTTPException(status_code=503, detail={"stage":"configuration","status":503,"message":"FREELLMAPI_API_KEY is not configured on the backend."})
+    headers={"Authorization":f"Bearer {FREELLMAPI_API_KEY}","Content-Type":"application/json"}
+    timeout=httpx.Timeout(connect=10.0,read=120.0,write=30.0,pool=10.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response=await client.post(endpoint(),json=body,headers=headers)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502,detail={"stage":"upstream","status":502,"message":"Backend could not reach FreeLLMAPI.","endpoint":endpoint(),"error":str(exc)}) from exc
+    if response.status_code>=400: raise provider_error(response.status_code,response.text)
+    return response
 
 @app.post("/api/chat")
 async def chat(payload: ChatRequest, request: Request):
-    if not FREELLMAPI_API_KEY: raise HTTPException(status_code=500, detail="FREELLMAPI_API_KEY is not configured")
     body={"model":DEFAULT_MODEL,"messages":guarded_messages(payload.messages),"stream":payload.stream}
     if payload.temperature is not None: body["temperature"]=payload.temperature
     if payload.max_tokens is not None: body["max_tokens"]=payload.max_tokens
-    headers={"Authorization":f"Bearer {FREELLMAPI_API_KEY}","Content-Type":"application/json"};url=f"{FREELLMAPI_URL}/v1/chat/completions"
     if payload.stream:
         async def stream_response():
             timeout=httpx.Timeout(connect=10.0,read=120.0,write=30.0,pool=10.0)
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream("POST",url,json=body,headers=headers) as response:
-                    if response.status_code>=400: raise RuntimeError(f"FreeLLMAPI returned {response.status_code}: {(await response.aread()).decode('utf-8',errors='replace')}")
-                    # Buffer the complete SSE response before sanitizing. Reasoning
-                    # often spans multiple chunks, so filtering each chunk alone is
-                    # not sufficient to prevent leakage.
-                    raw=b""
-                    async for chunk in response.aiter_bytes(): raw+=chunk
-                    yield sanitize_sse_chunk(raw)
+            headers={"Authorization":f"Bearer {FREELLMAPI_API_KEY}","Content-Type":"application/json"}
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    async with client.stream("POST",endpoint(),json=body,headers=headers) as response:
+                        if response.status_code>=400:
+                            raw=(await response.aread()).decode("utf-8",errors="replace")
+                            raise provider_error(response.status_code,raw)
+                        raw=b""
+                        async for chunk in response.aiter_bytes(): raw+=chunk
+                        yield sanitize_sse_chunk(raw)
+            except HTTPException:
+                raise
+            except httpx.HTTPError as exc:
+                raise RuntimeError(f"FreeLLMAPI connection error: {exc}") from exc
         return StreamingResponse(stream_response(),media_type="text/event-stream",headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+    response=await upstream_post(body)
     try:
-        timeout=httpx.Timeout(connect=10.0,read=120.0,write=30.0,pool=10.0)
-        async with httpx.AsyncClient(timeout=timeout) as client: response=await client.post(url,json=body,headers=headers)
-    except httpx.HTTPError as exc: raise HTTPException(status_code=502,detail=f"Unable to reach FreeLLMAPI: {exc}") from exc
-    if response.status_code>=400: raise HTTPException(status_code=response.status_code,detail=response.text)
-    return sanitize_response(response.json())
+        data=response.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=502,detail={"stage":"upstream","status":502,"message":"FreeLLMAPI returned invalid JSON","endpoint":endpoint()}) from exc
+    return sanitize_response(data)
